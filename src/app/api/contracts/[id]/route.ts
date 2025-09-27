@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { MongoClient, ObjectId } from 'mongodb';
 
-const MONGODB_URI = process.env.NEXT_PUBLIC_MONGODB_URI;
+const MONGODB_URI = process.env.MONGODB_URI;
 
 if (!MONGODB_URI) {
   throw new Error('Please add your MongoDB URI to .env.local');
@@ -24,7 +24,7 @@ export async function GET(
     let contract;
     try {
       contract = await collection.findOne({ _id: new ObjectId(id) });
-    } catch (e) {
+    } catch {
       // If ObjectId fails, try to find by name or contractName
       contract = await collection.findOne({
         $or: [
@@ -79,7 +79,7 @@ export async function DELETE(
     let result;
     try {
       result = await collection.deleteOne({ _id: new ObjectId(id) });
-    } catch (e) {
+    } catch {
       // If ObjectId fails, try to delete by name or contractName
       result = await collection.deleteOne({
         $or: [

@@ -5,6 +5,7 @@ import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { useAccount, usePublicClient, useWalletClient } from "wagmi";
 import type { Abi, Hex } from "viem";
 import { BaseError } from "viem";
+import Link from "next/link";
 
 interface Contract {
   _id: string;
@@ -14,7 +15,7 @@ interface Contract {
   originalFormat?: string;
   uploadedAt: string;
   createdAt?: string;
-  abi: any[];
+  abi: Abi;
   bytecode: string;
   deployedBytecode?: string;
   compilerVersion?: string;
@@ -126,8 +127,8 @@ export default function ContractDeployPage({ params }: { params: Promise<{ id: s
     // Validate constructor args count if constructor exists
     try {
       const constructorFragment = (parsedAbi as Abi).find(
-        (item) => (item as any).type === "constructor"
-      ) as any | undefined;
+        (item) => (item as { type?: string }).type === "constructor"
+      ) as { inputs?: { length: number } } | undefined;
       const requiredArgs = constructorFragment?.inputs?.length ?? 0;
       if (requiredArgs !== (parsedArgs?.length ?? 0)) {
         setError(
@@ -181,9 +182,9 @@ export default function ContractDeployPage({ params }: { params: Promise<{ id: s
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", minHeight: "50vh", padding: 32 }}>
         <h2>Contract Not Found</h2>
         <p style={{ color: "#666", marginBottom: 16 }}>{error}</p>
-        <a href="/" style={{ color: "#007bff", textDecoration: "none" }}>
+        <Link href="/" style={{ color: "#007bff", textDecoration: "none" }}>
           ← Back to Home
-        </a>
+        </Link>
       </div>
     );
   }
