@@ -23,6 +23,12 @@ interface Contract {
   sourcePath?: string;
 }
 
+interface ConstructorParam {
+  name: string;
+  type: string;
+  internalType?: string;
+}
+
 export default function ContractDeployPage({
   params,
 }: {
@@ -50,6 +56,12 @@ export default function ContractDeployPage({
   const [verificationStatus, setVerificationStatus] = useState<string>("");
   const [verificationGuid, setVerificationGuid] = useState<string>("");
   const [verificationMessage, setVerificationMessage] = useState<string>("");
+
+  // Dynamic constructor arguments state
+  const [constructorArgs, setConstructorArgs] = useState<
+    Record<string, string>
+  >({});
+  const [useDynamicArgs, setUseDynamicArgs] = useState<boolean>(true);
 
   // Unwrap params
   const resolvedParams = use(params);
@@ -98,15 +110,85 @@ export default function ContractDeployPage({
     }
   }, [abiText]);
 
-  const parsedArgs = useMemo(() => {
-    if (!argsText.trim()) return [] as unknown[];
-    try {
-      const maybe = JSON.parse(argsText);
-      return Array.isArray(maybe) ? (maybe as unknown[]) : [];
-    } catch {
-      return [] as unknown[];
+  // Extract constructor parameters from ABI
+  const constructorParams = useMemo((): ConstructorParam[] => {
+    if (!parsedAbi) return [];
+
+    const constructor = parsedAbi.find(
+      (item) => (item as { type?: string }).type === "constructor"
+    ) as { inputs?: ConstructorParam[] } | undefined;
+
+    return constructor?.inputs || [];
+  }, [parsedAbi]);
+
+  // Initialize constructor args when params change
+  useEffect(() => {
+    const initialArgs: Record<string, string> = {};
+    constructorParams.forEach((param, index) => {
+      initialArgs[`arg_${index}`] = "";
+    });
+    setConstructorArgs(initialArgs);
+  }, [constructorParams]);
+
+  // Build arguments array from dynamic inputs or JSON
+  const finalArgs = useMemo(() => {
+    if (!useDynamicArgs) {
+      // Use JSON array format
+      if (!argsText.trim()) return [] as unknown[];
+      try {
+        const maybe = JSON.parse(argsText);
+        return Array.isArray(maybe) ? (maybe as unknown[]) : [];
+      } catch {
+        return [] as unknown[];
+      }
+    } else {
+      // Use dynamic form inputs
+      return constructorParams.map((param, index) => {
+        const value = constructorArgs[`arg_${index}`] || "";
+
+        // Convert value based on type
+        if (value === "") return "";
+
+        try {
+          if (param.type === "bool" || param.type === "boolean") {
+            return value.toLowerCase() === "true";
+          } else if (
+            param.type.includes("int") &&
+            !param.type.includes("string")
+          ) {
+            return param.type.includes("uint") ? BigInt(value) : BigInt(value);
+          } else if (param.type === "address") {
+            return value as `0x${string}`;
+          } else if (param.type === "bytes" || param.type.startsWith("bytes")) {
+            return value as `0x${string}`;
+          } else {
+            return value;
+          }
+        } catch {
+          return value;
+        }
+      });
     }
-  }, [argsText]);
+  }, [useDynamicArgs, argsText, constructorArgs, constructorParams]);
+
+  // Encode constructor arguments for verification
+  const encodedArgs = useMemo(() => {
+    if (constructorParams.length === 0 || finalArgs.length === 0) {
+      return "";
+    }
+
+    try {
+      const types = constructorParams.map((param) => param.type);
+      const encoded = encodeAbiParameters(
+        types.map((type) => ({ type, name: "" })),
+        finalArgs
+      );
+      return encoded.slice(2); // Remove 0x prefix for Etherscan
+    } catch (error) {
+      console.error("Error encoding constructor arguments:", error);
+      return "";
+    }
+  }, [constructorParams, finalArgs]);
 
   const normalizeBytecode = (value: string): Hex | "" => {
     const trimmed = value.trim();
@@ -136,33 +218,28 @@ export default function ContractDeployPage({
       setError("Invalid ABI JSON.");
       return;
     }
-    // Validate constructor args count if constructor exists
-    try {
-      const constructorFragment = (parsedAbi as Abi).find(
-        (item) => (item as { type?: string }).type === "constructor"
-      ) as { inputs?: { length: number } } | undefined;
-      const requiredArgs = constructorFragment?.inputs?.length ?? 0;
-      if (requiredArgs !== (parsedArgs?.length ?? 0)) {
-        setError(
-          `Constructor expects ${requiredArgs} arg(s), but received ${
-            parsedArgs?.length ?? 0
-          }.`
-        );
-        return;
-      }
-    } catch {}
+
+    // Validate constructor args count
+    const requiredArgs = constructorParams.length;
+    if (requiredArgs !== finalArgs.length) {
+      setError(
+        `Constructor expects ${requiredArgs} arg(s), but received ${finalArgs.length}.`
+      );
+      return;
+    }
+
     const bytecode = normalizeBytecode(bytecodeText);
     if (!bytecode) {
       setError("Bytecode is required.");
       return;
     }
-    const hexBytecode: Hex = bytecode;
+
     setIsDeploying(true);
     try {
       const hash = await walletClient.deployContract({
         abi: parsedAbi,
-        bytecode: hexBytecode,
-        args: parsedArgs as unknown[],
+        bytecode: bytecode,
+        args: finalArgs as unknown[],
         account: address,
       });
       setTxHash(hash);
@@ -184,7 +261,8 @@ export default function ContractDeployPage({
     publicClient,
     parsedAbi,
     bytecodeText,
-    parsedArgs,
+    finalArgs,
+    constructorParams.length,
     address,
   ]);
 
@@ -208,7 +286,7 @@ export default function ContractDeployPage({
         body: JSON.stringify({
           contractId: resolvedParams.id,
           contractAddress: contractAddress,
-          constructorArgs: argsText || "[]",
+          constructorArgs: encodedArgs,
         }),
       });
 
@@ -237,7 +315,78 @@ export default function ContractDeployPage({
     } finally {
       setIsVerifying(false);
     }
-  }, [contractAddress, contract, resolvedParams.id, argsText]);
+  }, [contractAddress, contract, resolvedParams.id, encodedArgs]);
+
+  const renderConstructorArgsForm = () => {
+    if (constructorParams.length === 0) {
+      return (
+        <div
+          style={{
+            padding: "12px",
+            background: "#e9ecef",
+            borderRadius: "8px",
+            marginBottom: 16,
+          }}
+        >
+          <p style={{ margin: 0, fontSize: "14px", color: "#6c757d" }}>
+            This contract has no constructor parameters.
+          </p>
+        </div>
+      );
+    }
+
+    return (
+      <div style={{ marginBottom: 16 }}>
+        {constructorParams.map((param, index) => (
+          <div key={index} style={{ marginBottom: 12 }}>
+            <label
+              style={{
+                display: "block",
+                fontWeight: "500",
+                marginBottom: 4,
+                color: "#495057",
+                fontSize: "13px",
+              }}
+            >
+              {param.name || `Parameter ${index + 1}`} ({param.type})
+            </label>
+            <input
+              type="text"
+              value={constructorArgs[`arg_${index}`] || ""}
+              onChange={(e) =>
+                setConstructorArgs((prev) => ({
+                  ...prev,
+                  [`arg_${index}`]: e.target.value,
+                }))
+              }
+              placeholder={getPlaceholderForType(param.type)}
+              style={{
+                width: "100%",
+                padding: "8px 12px",
+                borderRadius: "6px",
+                border: "1px solid #dee2e6",
+                fontSize: "13px",
+                fontFamily:
+                  param.type === "address" || param.type.startsWith("bytes")
+                    ? "'Fira Code', monospace"
+                    : "inherit",
+              }}
+            />
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  const getPlaceholderForType = (type: string): string => {
+    if (type === "address") return "0x1234567890123456789012345678901234567890";
+    if (type === "bool" || type === "boolean") return "true or false";
+    if (type.includes("uint")) return "123";
+    if (type.includes("int")) return "123";
+    if (type === "string") return "Enter text";
+    if (type === "bytes" || type.startsWith("bytes")) return "0x1234abcd";
+    return `Enter ${type} value`;
+  };
 
   if (loading) {
     return (
@@ -362,7 +511,7 @@ export default function ContractDeployPage({
               value={abiText}
               onChange={(e) => setAbiText(e.target.value)}
               placeholder='[ { "type": "constructor", ... }, { "name": "mint", ... } ]'
-              rows={8}
+              rows={6}
               style={{
                 width: "100%",
                 fontFamily: "'Fira Code', 'Monaco', 'Consolas', monospace",
@@ -374,7 +523,7 @@ export default function ContractDeployPage({
                 lineHeight: "1.5",
                 background: "#f8f9fa",
                 resize: "vertical",
-                minHeight: "120px",
+                minHeight: "100px",
               }}
             />
           </div>
@@ -395,7 +544,7 @@ export default function ContractDeployPage({
               value={bytecodeText}
               onChange={(e) => setBytecodeText(e.target.value)}
               placeholder="0x600..."
-              rows={4}
+              rows={3}
               style={{
                 width: "100%",
                 fontFamily: "'Fira Code', 'Monaco', 'Consolas', monospace",
@@ -407,41 +556,114 @@ export default function ContractDeployPage({
                 lineHeight: "1.5",
                 background: "#f8f9fa",
                 resize: "vertical",
-                minHeight: "80px",
+                minHeight: "60px",
               }}
             />
           </div>
 
+          {/* Constructor Arguments Section */}
           <div style={{ marginBottom: 24 }}>
-            <label
+            <div
               style={{
-                display: "block",
-                fontWeight: "600",
-                marginBottom: 8,
-                color: "#495057",
-                fontSize: "14px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: 12,
               }}
             >
-              Constructor Arguments (JSON array)
-            </label>
-            <input
-              value={argsText}
-              onChange={(e) => setArgsText(e.target.value)}
-              placeholder="[]"
-              style={{
-                width: "100%",
-                fontFamily: "'Fira Code', 'Monaco', 'Consolas', monospace",
-                padding: "12px",
-                borderRadius: "8px",
-                border: "1px solid #dee2e6",
-                marginBottom: 16,
-                fontSize: "13px",
-                background: "#f8f9fa",
-              }}
-            />
+              <label
+                style={{
+                  fontWeight: "600",
+                  color: "#495057",
+                  fontSize: "14px",
+                }}
+              >
+                Constructor Arguments
+              </label>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <button
+                  onClick={() => setUseDynamicArgs(true)}
+                  style={{
+                    padding: "4px 12px",
+                    fontSize: "12px",
+                    borderRadius: "4px",
+                    border: "1px solid #dee2e6",
+                    background: useDynamicArgs ? "#007bff" : "white",
+                    color: useDynamicArgs ? "white" : "#495057",
+                    cursor: "pointer",
+                  }}
+                >
+                  Form
+                </button>
+                <button
+                  onClick={() => setUseDynamicArgs(false)}
+                  style={{
+                    padding: "4px 12px",
+                    fontSize: "12px",
+                    borderRadius: "4px",
+                    border: "1px solid #dee2e6",
+                    background: !useDynamicArgs ? "#007bff" : "white",
+                    color: !useDynamicArgs ? "white" : "#495057",
+                    cursor: "pointer",
+                  }}
+                >
+                  JSON
+                </button>
+              </div>
+            </div>
+
+            {useDynamicArgs ? (
+              renderConstructorArgsForm()
+            ) : (
+              <input
+                value={argsText}
+                onChange={(e) => setArgsText(e.target.value)}
+                placeholder="[]"
+                style={{
+                  width: "100%",
+                  fontFamily: "'Fira Code', 'Monaco', 'Consolas', monospace",
+                  padding: "12px",
+                  borderRadius: "8px",
+                  border: "1px solid #dee2e6",
+                  marginBottom: 16,
+                  fontSize: "13px",
+                  background: "#f8f9fa",
+                }}
+              />
+            )}
+
+            {/* Display encoded arguments for verification */}
+            {encodedArgs && (
+              <div style={{ marginTop: 8 }}>
+                <label
+                  style={{
+                    display: "block",
+                    fontWeight: "500",
+                    marginBottom: 4,
+                    color: "#495057",
+                    fontSize: "12px",
+                  }}
+                >
+                  Encoded Arguments (for verification):
+                </label>
+                <div
+                  style={{
+                    padding: "8px 12px",
+                    background: "#e9ecef",
+                    borderRadius: "6px",
+                    fontSize: "11px",
+                    fontFamily: "'Fira Code', monospace",
+                    wordBreak: "break-all",
+                    color: "#495057",
+                  }}
+                >
+                  {encodedArgs}
+                </div>
+              </div>
+            )}
           </div>
 
-          {error ? (
+          {error && (
             <div
               style={{
                 color: "#dc3545",
@@ -455,7 +677,7 @@ export default function ContractDeployPage({
             >
               {error}
             </div>
-          ) : null}
+          )}
 
           <div
             style={{
@@ -500,7 +722,7 @@ export default function ContractDeployPage({
             </div>
           </div>
 
-          {txHash ? (
+          {txHash && (
             <div
               style={{
                 marginTop: 24,
@@ -529,7 +751,7 @@ export default function ContractDeployPage({
                   </a>
                 </div>
               </div>
-              {contractAddress ? (
+              {contractAddress && (
                 <div>
                   <strong style={{ color: "#155724" }}>
                     Contract Address:
@@ -545,126 +767,127 @@ export default function ContractDeployPage({
                     {contractAddress}
                   </div>
                 </div>
-              ) : null}
+              )}
             </div>
-          ) : null}
-        </div>
+          )}
 
-        {/* Verification Section */}
-        {contractAddress ? (
-          <div
-            style={{
-              marginTop: 24,
-              padding: "20px",
-              background: "#f8f9fa",
-              borderRadius: "8px",
-              border: "1px solid #dee2e6",
-            }}
-          >
-            <h3
-              style={{
-                margin: "0 0 16px 0",
-                fontSize: "18px",
-                fontWeight: "600",
-                color: "#212529",
-              }}
-            >
-              Contract Verification
-            </h3>
-
+          {/* Verification Section */}
+          {contractAddress && (
             <div
               style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 16,
-                marginBottom: 16,
+                marginTop: 24,
+                padding: "20px",
+                background: "#f8f9fa",
+                borderRadius: "8px",
+                border: "1px solid #dee2e6",
               }}
             >
-              <button
-                onClick={() => void handleVerifyContract()}
-                disabled={isVerifying || !contractAddress}
+              <h3
                 style={{
-                  background:
-                    !isVerifying && contractAddress ? "#007bff" : "#6c757d",
-                  color: "#fff",
-                  padding: "12px 24px",
-                  border: "none",
-                  borderRadius: "8px",
-                  cursor:
-                    !isVerifying && contractAddress ? "pointer" : "not-allowed",
-                  fontSize: "16px",
+                  margin: "0 0 16px 0",
+                  fontSize: "18px",
                   fontWeight: "600",
-                  transition: "all 0.2s",
-                  minWidth: "140px",
+                  color: "#212529",
                 }}
               >
-                {isVerifying ? "Verifying..." : "Verify Contract"}
-              </button>
-              <div style={{ flex: 1 }}>
-                <div style={{ color: "#495057", fontSize: "14px" }}>
-                  <strong>Contract Address:</strong>{" "}
-                  {contractAddress.slice(0, 6)}...
-                  {contractAddress.slice(-4)}
-                </div>
-              </div>
-            </div>
+                Contract Verification
+              </h3>
 
-            {verificationMessage ? (
               <div
                 style={{
-                  padding: "12px",
-                  borderRadius: "8px",
-                  fontSize: "14px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 16,
                   marginBottom: 16,
-                  ...(verificationStatus === "failed"
-                    ? {
-                        color: "#dc3545",
-                        background: "#f8d7da",
-                        border: "1px solid #f5c6cb",
-                      }
-                    : verificationStatus === "verified" ||
-                      verificationStatus === "already_verified"
-                    ? {
-                        color: "#155724",
-                        background: "#d4edda",
-                        border: "1px solid #c3e6cb",
-                      }
-                    : {
-                        color: "#856404",
-                        background: "#fff3cd",
-                        border: "1px solid #ffeaa7",
-                      }),
                 }}
               >
-                <strong>
-                  {verificationStatus === "failed"
-                    ? "Verification Failed:"
-                    : verificationStatus === "verified"
-                    ? "Verification Successful:"
-                    : verificationStatus === "already_verified"
-                    ? "Already Verified:"
-                    : "Verification Status:"}
-                </strong>
-                <div style={{ marginTop: 4 }}>{verificationMessage}</div>
-                {verificationGuid && (
-                  <div style={{ marginTop: 8 }}>
-                    <strong>GUID:</strong>
-                    <div
-                      style={{
-                        fontFamily: "monospace",
-                        fontSize: "12px",
-                        wordBreak: "break-all",
-                        marginTop: 4,
-                      }}
-                    >
-                      {verificationGuid}
-                    </div>
+                <button
+                  onClick={() => void handleVerifyContract()}
+                  disabled={isVerifying || !contractAddress}
+                  style={{
+                    background:
+                      !isVerifying && contractAddress ? "#007bff" : "#6c757d",
+                    color: "#fff",
+                    padding: "12px 24px",
+                    border: "none",
+                    borderRadius: "8px",
+                    cursor:
+                      !isVerifying && contractAddress
+                        ? "pointer"
+                        : "not-allowed",
+                    fontSize: "16px",
+                    fontWeight: "600",
+                    transition: "all 0.2s",
+                    minWidth: "140px",
+                  }}
+                >
+                  {isVerifying ? "Verifying..." : "Verify Contract"}
+                </button>
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: "#495057", fontSize: "14px" }}>
+                    <strong>Contract Address:</strong>{" "}
+                    {contractAddress.slice(0, 6)}...{contractAddress.slice(-4)}
                   </div>
-                )}
+                </div>
               </div>
-            ) : null}
-          </div>
-        ) : null}
+
+              {verificationMessage && (
+                <div
+                  style={{
+                    padding: "12px",
+                    borderRadius: "8px",
+                    fontSize: "14px",
+                    marginBottom: 16,
+                    ...(verificationStatus === "failed"
+                      ? {
+                          color: "#dc3545",
+                          background: "#f8d7da",
+                          border: "1px solid #f5c6cb",
+                        }
+                      : verificationStatus === "verified" ||
+                        verificationStatus === "already_verified"
+                      ? {
+                          color: "#155724",
+                          background: "#d4edda",
+                          border: "1px solid #c3e6cb",
+                        }
+                      : {
+                          color: "#856404",
+                          background: "#fff3cd",
+                          border: "1px solid #ffeaa7",
+                        }),
+                  }}
+                >
+                  <strong>
+                    {verificationStatus === "failed"
+                      ? "Verification Failed:"
+                      : verificationStatus === "verified"
+                      ? "Verification Successful:"
+                      : verificationStatus === "already_verified"
+                      ? "Already Verified:"
+                      : "Verification Status:"}
+                  </strong>
+                  <div style={{ marginTop: 4 }}>{verificationMessage}</div>
+                  {verificationGuid && (
+                    <div style={{ marginTop: 8 }}>
+                      <strong>GUID:</strong>
+                      <div
+                        style={{
+                          fontFamily: "monospace",
+                          fontSize: "12px",
+                          wordBreak: "break-all",
+                          marginTop: 4,
+                        }}
+                      >
+                        {verificationGuid}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* Right Side - Contract Information */}
         <div
@@ -739,9 +962,9 @@ export default function ContractDeployPage({
             </div>
           )}
 
-          {/* Source Code Editor */}
-          {contract.source && (
-            <div style={{ marginTop: 24 }}>
+          {/* Constructor Parameters Info */}
+          {constructorParams.length > 0 && (
+            <div style={{ marginBottom: 20 }}>
               <div
                 style={{
                   fontSize: "14px",
@@ -750,43 +973,24 @@ export default function ContractDeployPage({
                   marginBottom: 8,
                 }}
               >
-                Source Code
+                Constructor Parameters
               </div>
               <div
                 style={{
-                  border: "1px solid #dee2e6",
-                  borderRadius: "8px",
-                  overflow: "hidden",
+                  padding: "8px 12px",
                   background: "#f8f9fa",
+                  borderRadius: "6px",
+                  fontSize: "13px",
+                  color: "#212529",
                 }}
               >
-                <div
-                  style={{
-                    background: "#e9ecef",
-                    padding: "8px 12px",
-                    borderBottom: "1px solid #dee2e6",
-                    fontSize: "12px",
-                    fontWeight: "600",
-                    color: "#495057",
-                  }}
-                >
-                  Solidity
-                </div>
-                <pre
-                  style={{
-                    margin: 0,
-                    padding: "16px",
-                    fontFamily: "'Fira Code', 'Monaco', 'Consolas', monospace",
-                    fontSize: "12px",
-                    lineHeight: "1.5",
-                    color: "#212529",
-                    background: "#ffffff",
-                    overflow: "auto",
-                    maxHeight: "300px",
-                  }}
-                >
-                  {contract.source}
-                </pre>
+                {constructorParams.map((param, index) => (
+                  <div key={index} style={{ marginBottom: 4 }}>
+                    <span style={{ fontFamily: "monospace" }}>
+                      {param.name || `param${index}`}: {param.type}
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
           )}
