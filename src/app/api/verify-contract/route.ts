@@ -58,15 +58,16 @@ async function submitVerification(
       chainid: CHAIN_ID.toString(),
       module: "contract",
       action: "verifysourcecode",
-      contractname:
-        contractData.contractName || contractData.name || "Contract",
+      contractname: String(
+        contractData.contractName || contractData.name || "Contract"
+      ),
       codeformat: "solidity-single-file",
-      compilerversion: `v${contractData.compilerVersion}`,
-      constructorArguments: constructorArgs,
-      OptimizationUsed: contractData.settings.optimizer.enabled ? "1" : "0",
+      compilerversion: `v${String(contractData.compilerVersion)}`,
+      constructorArguments: constructorArgs ?? "",
+      OptimizationUsed: contractData.settings?.optimizer?.enabled ? "1" : "0",
       runs: "200",
       sourceCode: sourceCode,
-      evmversion: contractData.settings.evmVersion,
+      evmversion: String(contractData.settings?.evmVersion ?? ""),
     });
 
     const endpoint = `https://api.etherscan.io/v2/api?chainId=${CHAIN_ID}`;
