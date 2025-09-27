@@ -78,7 +78,7 @@ function Page() {
       if (!abi && !bytecode) {
         setError("Could not find ABI/bytecode in artifact JSON.");
       }
-    } catch (e) {
+    } catch {
       setError("Failed to parse artifact JSON.");
     }
   }, []);
@@ -129,8 +129,9 @@ function Page() {
     // Validate constructor args count if constructor exists
     try {
       const constructorFragment = (parsedAbi as Abi).find(
-        (item) => (item as any).type === "constructor"
-      ) as any | undefined;
+        (item): item is Extract<Abi[number], { type: "constructor" }> =>
+          item.type === "constructor"
+      );
       const requiredArgs = constructorFragment?.inputs?.length ?? 0;
       if (requiredArgs !== (parsedArgs?.length ?? 0)) {
         setError(
@@ -169,7 +170,14 @@ function Page() {
     } finally {
       setIsDeploying(false);
     }
-  }, [walletClient, publicClient, parsedAbi, bytecodeText, parsedArgs]);
+  }, [
+    walletClient,
+    publicClient,
+    parsedAbi,
+    bytecodeText,
+    parsedArgs,
+    address,
+  ]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
