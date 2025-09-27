@@ -4,7 +4,7 @@ import { MongoClient, ObjectId } from "mongodb";
 const MONGODB_URI = process.env.MONGODB_URI;
 const ETHERSCAN_API_KEY =
   process.env.ETHERSCAN_API_KEY || "JGWS1C3GSNW3GQYVU5AHMB5Y2I9KUI6YHW";
-const CHAIN_ID = 84532; // Base Sepolia
+const CHAIN_ID = 8453; // Base
 
 if (!MONGODB_URI) {
   throw new Error("Please add your MongoDB URI to .env.local");
