@@ -4,6 +4,7 @@ import { useCallback, useMemo, useState } from "react";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { useAccount, usePublicClient, useWalletClient } from "wagmi";
 import type { Abi, Hex } from "viem";
+import { BaseError } from "viem";
 
 function Page() {
   const { address, isConnected } = useAccount();
@@ -53,13 +54,27 @@ function Page() {
       // Common layouts: Hardhat/Truffle: json.abi, json.bytecode
       // solc standard JSON: json.abi, json.evm.bytecode.object
       const abi = json.abi ? JSON.stringify(json.abi, null, 2) : "";
-      const bytecode = json.bytecode
-        ? json.bytecode
-        : json.evm?.bytecode?.object
-        ? json.evm.bytecode.object
-        : "";
+      // bytecode can be string at json.bytecode OR object at json.bytecode.object OR json.evm.bytecode.object
+      let bytecode: string = "";
+      if (typeof json.bytecode === "string") {
+        bytecode = json.bytecode;
+      } else if (json.bytecode?.object) {
+        bytecode = json.bytecode.object;
+      } else if (json.evm?.bytecode?.object) {
+        bytecode = json.evm.bytecode.object;
+      }
       if (abi) setAbiText(abi);
-      if (bytecode) setBytecodeText(normalizeBytecode(String(bytecode)));
+      if (bytecode) setBytecodeText(String(bytecode));
+      // Try to preload constructor args if present in artifact
+      const argsCandidate =
+        json.constructorArguments ?? json.args ?? json.parameters ?? null;
+      if (argsCandidate) {
+        try {
+          setArgsText(JSON.stringify(argsCandidate, null, 2));
+        } catch {
+          // ignore if not serializable
+        }
+      }
       if (!abi && !bytecode) {
         setError("Could not find ABI/bytecode in artifact JSON.");
       }
@@ -111,6 +126,21 @@ function Page() {
       setError("Invalid ABI JSON.");
       return;
     }
+    // Validate constructor args count if constructor exists
+    try {
+      const constructorFragment = (parsedAbi as Abi).find(
+        (item) => (item as any).type === "constructor"
+      ) as any | undefined;
+      const requiredArgs = constructorFragment?.inputs?.length ?? 0;
+      if (requiredArgs !== (parsedArgs?.length ?? 0)) {
+        setError(
+          `Constructor expects ${requiredArgs} arg(s), but received ${
+            parsedArgs?.length ?? 0
+          }.`
+        );
+        return;
+      }
+    } catch {}
     const bytecode = normalizeBytecode(bytecodeText);
     if (!bytecode) {
       setError("Bytecode is required.");
@@ -122,13 +152,19 @@ function Page() {
       const hash = await walletClient.deployContract({
         abi: parsedAbi,
         bytecode: hexBytecode,
-        args: parsedArgs,
+        args: parsedArgs as unknown[],
+        account: address,
       });
       setTxHash(hash);
       const receipt = await publicClient.waitForTransactionReceipt({ hash });
       if (receipt.contractAddress) setContractAddress(receipt.contractAddress);
     } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message =
+        e instanceof BaseError
+          ? e.shortMessage || e.message
+          : e instanceof Error
+          ? e.message
+          : String(e);
       setError(message || "Deployment failed.");
     } finally {
       setIsDeploying(false);
